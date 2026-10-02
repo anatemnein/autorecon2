@@ -283,7 +283,8 @@ func scanHTTP(ctx context.Context, target string, p Port, base string, wg *sync.
 			info("[%s] feroxbuster → %s", target, url)
 			run(ctx, filepath.Join(dir, "ferox.txt"), "feroxbuster",
 				"-u", url, "-w", wl, "-t", "50", "--depth", "3",
-				"--no-state", "--silent", "-k")
+				"--no-state", "-k",
+				"--dont-scan", `(com[0-9]+|con|aux|lpt[0-9]*|nul|prn)$`)
 		case "gobuster":
 			info("[%s] gobuster → %s", target, url)
 			run(ctx, filepath.Join(dir, "gobuster.txt"), "gobuster", "dir",
@@ -732,30 +733,37 @@ func generateReport(target, base string, tcpPorts []string, services []Port, sta
 
 	// quick wins checklist
 	fmt.Fprintf(f, "## Quick Wins to Check\n\n")
+	seen := map[string]bool{}
+	qw := func(key, line string) {
+		if !seen[key] {
+			seen[key] = true
+			fmt.Fprintf(f, "- [ ] %s\n", line)
+		}
+	}
 	for _, s := range services {
 		switch {
 		case isHTTP(s):
-			fmt.Fprintf(f, "- [ ] HTTP %d — check ferox.txt, nikto.txt, httpx.txt\n", s.Num)
+			qw(fmt.Sprintf("http%d", s.Num), fmt.Sprintf("HTTP %d — check ferox.txt, nikto.txt, httpx.txt", s.Num))
 		case s.Num == 445 || s.Num == 139:
-			fmt.Fprintf(f, "- [ ] SMB — check enum4linux.txt, smbmap.txt, nmap_smb.txt (CVEs)\n")
+			qw("smb", "SMB — check enum4linux.txt, smbmap.txt, nmap_smb.txt (CVEs)")
 		case s.Num == 21:
-			fmt.Fprintf(f, "- [ ] FTP — check ftp-anon in nmap_ftp.txt\n")
+			qw("ftp", "FTP — check ftp-anon in nmap_ftp.txt")
 		case s.Num == 2049 || s.Num == 111:
-			fmt.Fprintf(f, "- [ ] NFS — check showmount.txt for exposed shares\n")
+			qw("nfs", "NFS — check showmount.txt for exposed shares")
 		case isSMTP(s):
-			fmt.Fprintf(f, "- [ ] SMTP — check smtp_userenum.txt for valid usernames\n")
+			qw("smtp", "SMTP — check smtp_userenum.txt for valid usernames")
 		case s.Num == 88:
-			fmt.Fprintf(f, "- [ ] Kerberos — check kerbrute.txt, try AS-REP roasting\n")
+			qw("kerb", "Kerberos — check kerbrute.txt, try AS-REP roasting")
 		case s.Num == 6379:
-			fmt.Fprintf(f, "- [ ] Redis — check redis_info.txt for unauthenticated access\n")
+			qw("redis", "Redis — check redis_info.txt for unauthenticated access")
 		case s.Num == 3306:
-			fmt.Fprintf(f, "- [ ] MySQL — check mysql-empty-password in nmap_mysql.txt\n")
+			qw("mysql", "MySQL — check mysql-empty-password in nmap_mysql.txt")
 		case s.Num == 5985 || s.Num == 5986:
-			fmt.Fprintf(f, "- [ ] WinRM — try evil-winrm if creds found\n")
+			qw("winrm", "WinRM — try evil-winrm if creds found")
 		case s.Num == 389 || s.Num == 636:
-			fmt.Fprintf(f, "- [ ] LDAP — check ldapsearch_base.txt for domain info\n")
+			qw("ldap", "LDAP — check ldapsearch_base.txt for domain info")
 		case s.Num == 161:
-			fmt.Fprintf(f, "- [ ] SNMP — check extend_public.txt for creds in extend MIB\n")
+			qw("snmp", "SNMP — check extend_public.txt for creds in extend MIB")
 		}
 	}
 
