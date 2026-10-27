@@ -1065,7 +1065,11 @@ func main() {
 
 	// Re-exec with sudo when not root so UDP scans always work.
 	if os.Getuid() != 0 {
-		cmd := exec.Command("sudo", append([]string{os.Args[0]}, os.Args[1:]...)...)
+		self, err := os.Executable()
+		if err != nil {
+			self = os.Args[0]
+		}
+		cmd := exec.Command("sudo", append([]string{self}, os.Args[1:]...)...)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		if err := cmd.Run(); err != nil {
 			os.Exit(1)
