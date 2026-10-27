@@ -32,9 +32,13 @@ const banner = `
   └────────────────────────────────────────────────────┘`
 
 var (
-	outDir  string
-	verbose bool
-	mu      sync.Mutex
+	outDir   string
+	verbose  bool
+	mu       sync.Mutex
+	adMode   bool
+	adUser   string
+	adPass   string
+	adDomain string
 )
 
 func pr(col, tag, f string, a ...any) {
@@ -727,6 +731,130 @@ func scanUnknown(ctx context.Context, target string, p Port, base string, wg *sy
 	good("[%s] unknown:%d ✓", target, p.Num)
 }
 
+// ─────────── AD ENUMERATION ──────────────────────────────────────────────
+
+// domainToDN converts "corp.local" → "DC=corp,DC=local"
+func domainToDN(domain string) string {
+	parts := strings.Split(domain, ".")
+	dcs := make([]string, len(parts))
+	for i, p := range parts {
+		dcs[i] = "DC=" + p
+	}
+	return strings.Join(dcs, ",")
+}
+
+func scanAD(ctx context.Context, target, base string, wg *sync.WaitGroup) {
+	defer wg.Done()
+	dir := mkDir(base, "ad")
+	hasCreds := adUser != ""
+
+	if hasCreds {
+		info("[%s] AD enum — user=%s domain=%s", target, adUser, adDomain)
+	} else {
+		info("[%s] AD enum — anonymous/null session", target)
+	}
+
+	// credential args for nxc/ldap
+	var ca []string
+	if hasCreds {
+		ca = []string{"-u", adUser, "-p", adPass}
+	} else {
+		ca = []string{"-u", "", "-p", ""}
+	}
+
+	// ── nxc smb ──────────────────────────────────────────────────────────
+	nxcSMB := func(flag, out string) {
+		args := append(append([]string{"smb", target}, ca...), flag)
+		run(ctx, filepath.Join(dir, out), "nxc", args...)
+	}
+	nxcSMB("--shares", "nxc_smb_shares.txt")
+	nxcSMB("--users", "nxc_smb_users.txt")
+	nxcSMB("--groups", "nxc_smb_groups.txt")
+	nxcSMB("--pass-pol", "nxc_smb_passpol.txt")
+	nxcSMB("--rid-brute", "nxc_smb_rid.txt")
+
+	// ── nxc ldap ─────────────────────────────────────────────────────────
+	nxcLDAP := func(flag, out string) {
+		args := append(append([]string{"ldap", target}, ca...), flag)
+		run(ctx, filepath.Join(dir, out), "nxc", args...)
+	}
+	nxcLDAP("--users", "nxc_ldap_users.txt")
+	nxcLDAP("--groups", "nxc_ldap_groups.txt")
+
+	asrepArgs := append(append([]string{"ldap", target}, ca...), "--asreproast", filepath.Join(dir, "asrep.hash"))
+	run(ctx, filepath.Join(dir, "nxc_ldap_asrep.txt"), "nxc", asrepArgs...)
+
+	if hasCreds {
+		krbArgs := append(append([]string{"ldap", target}, ca...), "--kerberoast", filepath.Join(dir, "kerberoast.hash"))
+		run(ctx, filepath.Join(dir, "nxc_ldap_kerberoast.txt"), "nxc", krbArgs...)
+
+		winrmArgs := append([]string{"winrm", target}, ca...)
+		run(ctx, filepath.Join(dir, "nxc_winrm.txt"), "nxc", winrmArgs...)
+	}
+
+	// ── enum4linux-ng ─────────────────────────────────────────────────────
+	if has("enum4linux-ng") {
+		if hasCreds {
+			run(ctx, filepath.Join(dir, "enum4linux.txt"), "enum4linux-ng",
+				"-A", "-u", adUser, "-p", adPass, target)
+		} else {
+			run(ctx, filepath.Join(dir, "enum4linux.txt"), "enum4linux-ng",
+				"-A", target)
+		}
+	}
+
+	// ── rpcclient ─────────────────────────────────────────────────────────
+	var rpcAuth []string
+	if hasCreds {
+		rpcAuth = []string{"-U", adUser + "%" + adPass}
+	} else {
+		rpcAuth = []string{"-U", "", "-N"}
+	}
+	for _, cmd := range []string{"enumdomusers", "enumdomgroups", "enumprinters", "querydominfo", "lsaenumsid"} {
+		safe := strings.ReplaceAll(cmd, " ", "_")
+		rpcArgs := append(append([]string{}, rpcAuth...), "-c", cmd, target)
+		run(ctx, filepath.Join(dir, "rpc_"+safe+".txt"), "rpcclient", rpcArgs...)
+	}
+
+	// ── ldapsearch ────────────────────────────────────────────────────────
+	if adDomain != "" {
+		baseDN := domainToDN(adDomain)
+		if hasCreds {
+			run(ctx, filepath.Join(dir, "ldapsearch_users.txt"), "ldapsearch",
+				"-x", "-H", "ldap://"+target,
+				"-D", adUser+"@"+adDomain, "-w", adPass,
+				"-b", baseDN, "(objectClass=user)",
+				"cn", "sAMAccountName", "memberOf", "userPrincipalName")
+			run(ctx, filepath.Join(dir, "ldapsearch_computers.txt"), "ldapsearch",
+				"-x", "-H", "ldap://"+target,
+				"-D", adUser+"@"+adDomain, "-w", adPass,
+				"-b", baseDN, "(objectClass=computer)",
+				"cn", "dNSHostName", "operatingSystem")
+		} else {
+			run(ctx, filepath.Join(dir, "ldapsearch_anon.txt"), "ldapsearch",
+				"-x", "-H", "ldap://"+target,
+				"-b", baseDN, "(objectClass=*)")
+		}
+	} else {
+		run(ctx, filepath.Join(dir, "ldapsearch_base.txt"), "ldapsearch",
+			"-x", "-H", "ldap://"+target,
+			"-b", "", "(objectClass=*)", "namingContexts", "defaultNamingContext")
+	}
+
+	// ── kerbrute ─────────────────────────────────────────────────────────
+	if adDomain != "" && has("kerbrute") {
+		wordlist := "/usr/share/seclists/Usernames/xato-net-10-million-usernames.txt"
+		if _, err := os.Stat(wordlist); err == nil {
+			run(ctx, filepath.Join(dir, "kerbrute.txt"), "kerbrute",
+				"userenum", "--dc", target, "--domain", adDomain, wordlist)
+		} else {
+			info("[%s] kerbrute: wordlist not found — skip", target)
+		}
+	}
+
+	good("[%s] ad ✓", target)
+}
+
 // ─────────── REPORT ───────────────────────────────────────────────────────
 
 func generateReport(target, base string, tcpPorts []string, services []Port, start time.Time) {
@@ -780,6 +908,7 @@ func generateReport(target, base string, tcpPorts []string, services []Port, sta
 			qw("winrm", "WinRM — try evil-winrm if creds found")
 		case s.Num == 389 || s.Num == 636:
 			qw("ldap", "LDAP — check ldapsearch_base.txt for domain info")
+			qw("ad", "AD — check ad/ dir: nxc_smb_*, rpc_*, ldapsearch_*, asrep.hash, kerberoast.hash")
 		case s.Num == 161:
 			qw("snmp", "SNMP — check extend_public.txt for creds in extend MIB")
 		}
@@ -915,6 +1044,11 @@ func scanTarget(target string) {
 	dispatch("udp", func() { scanUDP(ctx, target, base, &wg) })
 	dispatch("snmp", func() { scanSNMP(ctx, target, base, &wg) })
 
+	// AD scan: trigger when domain ports found or -AD forced
+	if adMode || dispatched["smb"] || dispatched["ldap"] || dispatched["kerberos"] {
+		dispatch("ad", func() { scanAD(ctx, target, base, &wg) })
+	}
+
 	wg.Wait()
 
 	// summary report
@@ -941,14 +1075,19 @@ func main() {
 
 	flag.StringVar(&outDir, "o", "recon", "output directory")
 	flag.BoolVar(&verbose, "v", false, "verbose: stream all tool output to stdout")
+	flag.BoolVar(&adMode, "AD", false, "force AD enumeration regardless of discovered ports")
+	flag.StringVar(&adUser, "u", "", "AD username for authenticated enumeration")
+	flag.StringVar(&adPass, "p", "", "AD password for authenticated enumeration")
+	flag.StringVar(&adDomain, "d", "", "AD domain (e.g. corp.local) for ldapsearch + kerbrute")
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, banner+"\n\nUsage: autorecon2 [flags] <target> [target ...]\n\nFlags:\n")
 		flag.PrintDefaults()
 		fmt.Fprintln(os.Stderr, `
 Examples:
-  autorecon2 10.10.10.5                     # OSCP safe
-  autorecon2 -o /tmp/recon 10.10.10.5 10.10.10.6 10.10.10.7
-  sudo autorecon2 10.10.10.5                # enables UDP scan
+  autorecon2 10.10.10.5
+  autorecon2 -o /tmp/recon 10.10.10.5 10.10.10.6
+  autorecon2 -AD -u admin -p 'P@ss123' -d corp.local 10.10.10.5
+  autorecon2 -AD 10.10.10.5                # anonymous AD enum
 `)
 	}
 	flag.Parse()
@@ -969,7 +1108,7 @@ Examples:
 		"rustscan", "nmap", "httpx", "curl",
 		"feroxbuster", "gobuster", "ffuf",
 		"nikto", "whatweb", "sslscan", "gowitness",
-		"enum4linux", "nxc", "smbmap", "smbclient", "rpcclient",
+		"enum4linux", "enum4linux-ng", "nxc", "smbmap", "smbclient", "rpcclient",
 		"snmpwalk", "onesixtyone",
 		"ldapsearch", "dig",
 		"showmount", "rpcinfo",
