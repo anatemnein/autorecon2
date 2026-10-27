@@ -709,6 +709,24 @@ func scanUDP(ctx context.Context, target, base string, wg *sync.WaitGroup) {
 	good("[%s] udp ✓", target)
 }
 
+// ─────────── UNKNOWN ──────────────────────────────────────────────────────
+
+func scanUnknown(ctx context.Context, target string, p Port, base string, wg *sync.WaitGroup) {
+	defer wg.Done()
+	dir := mkDir(base, fmt.Sprintf("unknown_%d", p.Num))
+	info("[%s] unknown port %d (%s) — banner + scripts", target, p.Num, p.Name)
+
+	// nmap default scripts + version on that specific port
+	run(ctx, filepath.Join(dir, "nmap_unknown.txt"), "nmap",
+		"-Pn", "-sV", "-sC", "-p", strconv.Itoa(p.Num), target)
+
+	// nc banner grab (2s timeout)
+	run(ctx, filepath.Join(dir, "nc_banner.txt"),
+		"nc", "-w", "2", "-v", target, strconv.Itoa(p.Num))
+
+	good("[%s] unknown:%d ✓", target, p.Num)
+}
+
 // ─────────── REPORT ───────────────────────────────────────────────────────
 
 func generateReport(target, base string, tcpPorts []string, services []Port, start time.Time) {
@@ -813,17 +831,15 @@ func scanTarget(target string) {
 		good("[%s] TCP open: [%s]", target, strings.Join(tcpPorts, ", "))
 	}
 
-	// ── Phase 2: service detection on discovered ports ────────────────────
+	// ── Phase 2: full service detection -p- (catches ports rustscan missed) ─
 	var services []Port
-	if len(tcpPorts) > 0 {
-		info("[%s] service detection on %d port(s)", target, len(tcpPorts))
-		run(ctx, filepath.Join(base, "nmap_svc.txt"), "nmap",
-			"-Pn", "-sV", "-sC", "-A", "--osscan-guess",
-			"-p", strings.Join(tcpPorts, ","),
-			"-oA", filepath.Join(base, "nmap_svc"),
-			target)
-		services = parseServices(filepath.Join(base, "nmap_svc.gnmap"))
-	}
+	info("[%s] nmap -sV -p- (--min-rate 5000)", target)
+	run(ctx, filepath.Join(base, "nmap_svc.txt"), "nmap",
+		"-Pn", "-sV", "-sC", "-A", "--osscan-guess",
+		"-p-", "--min-rate", "5000",
+		"-oA", filepath.Join(base, "nmap_svc"),
+		target)
+	services = parseServices(filepath.Join(base, "nmap_svc.gnmap"))
 
 	if len(services) > 0 {
 		tags := make([]string, len(services))
@@ -889,6 +905,9 @@ func scanTarget(target string) {
 			dispatch("oracle", func() { scanOracle(ctx, target, base, &wg) })
 		case p.Num >= 5900 && p.Num <= 5910 || strings.Contains(name, "vnc"):
 			dispatch(fmt.Sprintf("vnc%d", p.Num), func() { scanVNC(ctx, target, p.Num, base, &wg) })
+		default:
+			// unknown service — grab banner + default nmap scripts
+			dispatch(fmt.Sprintf("unknown%d", p.Num), func() { scanUnknown(ctx, target, p, base, &wg) })
 		}
 	}
 
