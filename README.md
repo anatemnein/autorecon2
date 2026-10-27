@@ -11,9 +11,10 @@ Runs rustscan → nmap service detection → per-service enumeration in parallel
 
 ```
 Phase 1  →  rustscan (fast TCP discovery, falls back to nmap -p-)
-Phase 2  →  nmap -sV -sC on discovered ports only
+Phase 2  →  nmap -sV -sC -p- --min-rate 5000 (full port range)
 Phase 3  →  goroutine per open service (all run in parallel)
-           + sudo nmap -sU (UDP top-20, if root)
+           + sudo nmap -sU (UDP top-20, always root via auto re-exec)
+           + scanAD if ports 88/389/445 found, or -AD forced
 ```
 
 ## Install
@@ -40,8 +41,9 @@ cp autorecon2 ~/.local/bin/
 | `smbmap` | SMB share enumeration |
 | `smbclient` | SMB share access |
 | `nbtscan` | NetBIOS scan |
-| `enum4linux` | SMB/RPC enumeration |
-| `nxc` / `netexec` | SMB/WinRM/MSSQL testing |
+| `enum4linux` | SMB/RPC enumeration (legacy) |
+| `enum4linux-ng` | SMB/RPC enumeration (preferred) |
+| `nxc` / `netexec` | SMB/LDAP/WinRM/MSSQL testing |
 | `rpcclient` | RPC enumeration |
 | `smtp-user-enum` | SMTP user enumeration |
 | `snmpwalk` | SNMP enumeration |
@@ -68,9 +70,20 @@ autorecon2 -o /tmp/recon 10.10.10.5
 # Verbose (stream all tool output)
 autorecon2 -v 10.10.10.5
 
-# UDP scan (requires root)
-sudo autorecon2 10.10.10.5
+# AD enumeration — auto-triggered when ports 88/389/445 found
+autorecon2 10.10.10.5
+
+# AD enumeration — forced, anonymous (null session)
+autorecon2 -AD 10.10.10.5
+
+# AD enumeration — authenticated with credentials
+autorecon2 -AD -u administrator -p 'P@ss123' -d corp.local 10.10.10.5
+
+# AD enumeration — with domain, no creds (null session + kerbrute)
+autorecon2 -AD -d corp.local 10.10.10.5
 ```
+
+> **Note:** autorecon2 auto re-execs with `sudo` if not root — UDP scans always work.
 
 ### Flags
 
@@ -78,6 +91,10 @@ sudo autorecon2 10.10.10.5
 |------|---------|-------------|
 | `-o` | `recon` | Output directory |
 | `-v` | `false` | Verbose — stream all tool output to stdout |
+| `-AD` | `false` | Force AD enumeration regardless of discovered ports |
+| `-u` | `""` | AD username for authenticated enumeration |
+| `-p` | `""` | AD password for authenticated enumeration |
+| `-d` | `""` | AD domain (e.g. `corp.local`) — enables ldapsearch + kerbrute |
 
 ---
 
@@ -105,6 +122,23 @@ recon/
     │   ├── snmpwalk_public.txt
     │   └── snmpwalk_extend_public.txt
     ├── kerberos/
+    │   └── kerbrute.txt
+    ├── ad/
+    │   ├── nxc_smb_shares.txt
+    │   ├── nxc_smb_users.txt
+    │   ├── nxc_smb_groups.txt
+    │   ├── nxc_smb_passpol.txt
+    │   ├── nxc_smb_rid.txt
+    │   ├── nxc_ldap_users.txt
+    │   ├── nxc_ldap_asrep.txt
+    │   ├── asrep.hash            # ready for hashcat -m 18200
+    │   ├── kerberoast.hash       # ready for hashcat -m 13100
+    │   ├── nxc_winrm.txt
+    │   ├── enum4linux.txt
+    │   ├── rpc_enumdomusers.txt
+    │   ├── rpc_enumdomgroups.txt
+    │   ├── rpc_querydominfo.txt
+    │   ├── ldapsearch_users.txt
     │   └── kerbrute.txt
     └── report.md             # Quick wins checklist
 ```
@@ -137,6 +171,6 @@ After each scan, `autorecon2` generates a `report.md` with a quick wins checklis
 | Speed | ~5–8 min | ~20–30 min |
 | HTTP probing | httpx | curl/nmap |
 | Screenshots | gowitness | none |
-| AD tooling | nxc, kerbrute | netexec |
+| AD tooling | nxc, enum4linux-ng, rpcclient, ldapsearch, kerbrute | netexec |
 | OSCP compliant | yes (no nuclei/odat) | yes |
 | Binary | single static binary | Python + 78 plugins |
