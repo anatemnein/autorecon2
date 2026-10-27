@@ -910,6 +910,16 @@ func scanTarget(target string) {
 func main() {
 	fixSudoPath()
 
+	// Re-exec with sudo when not root so UDP scans always work.
+	if os.Getuid() != 0 {
+		cmd := exec.Command("sudo", append([]string{os.Args[0]}, os.Args[1:]...)...)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		if err := cmd.Run(); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	flag.StringVar(&outDir, "o", "recon", "output directory")
 	flag.BoolVar(&verbose, "v", false, "verbose: stream all tool output to stdout")
 	flag.Usage = func() {
